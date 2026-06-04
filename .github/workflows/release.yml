@@ -64,11 +64,49 @@ jobs:
 
       - name: Prepare build files
         run: |
+          # 检查 Secrets 确保不是因为未配置而导致空值
+          if [ -z "${{ secrets.KEY_BASE64 }}" ]; then
+            echo "❌ Error: KEY_BASE64 secret is missing!"
+            exit 1
+          fi
+          if [ -z "${{ secrets.SIGNING_CONFIG }}" ]; then
+            echo "❌ Error: SIGNING_CONFIG secret is missing!"
+            exit 1
+          fi
+
           # Decode base64-encoded keystore
           echo "${{ secrets.KEY_BASE64 }}" | base64 -d > app/app.key
 
           # Write signing config to local.properties
           echo "${{ secrets.SIGNING_CONFIG }}" > local.properties
+
+          # 自动修正 local.properties 中的 storeFile 路径为当前运行器中的绝对路径
+          python - <<'PY'
+          import os
+          from pathlib import Path
+
+          local_props = Path("local.properties")
+          if local_props.exists():
+              lines = local_props.read_text().splitlines()
+              patched_lines = []
+              for line in lines:
+                  # 匹配 storeFile 或 STORE_FILE 的配置行
+                  if "storeFile" in line or "STORE_FILE" in line:
+                      parts = line.split('=', 1)
+                      if len(parts) == 2:
+                          key = parts[0].strip()
+                          # 解析出 app/app.key 在 Linux 容器中的绝对路径
+                          abs_path = os.path.abspath("app/app.key")
+                          patched_lines.append(f"{key}={abs_path}")
+                          print(f"✅ Patched {key} to absolute runner path: {abs_path}")
+                      else:
+                          patched_lines.append(line)
+                  else:
+                      patched_lines.append(line)
+              local_props.write_text("\n".join(patched_lines) + "\n")
+          else:
+              print("⚠️ local.properties not found!")
+          PY
 
           # Write Google Services config (if needed)
           if [ -n "${{ secrets.GOOGLE_SERVICES_JSON }}" ]; then
