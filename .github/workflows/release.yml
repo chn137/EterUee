@@ -64,7 +64,7 @@ jobs:
 
       - name: Prepare build files
         run: |
-          # 检查 Secrets 确保不是因为未配置而导致空值
+          # 预检 Secrets
           if [ -z "${{ secrets.KEY_BASE64 }}" ]; then
             echo "❌ Error: KEY_BASE64 secret is missing!"
             exit 1
@@ -77,35 +77,70 @@ jobs:
           # Decode base64-encoded keystore
           echo "${{ secrets.KEY_BASE64 }}" | base64 -d > app/app.key
 
-          # Write signing config to local.properties
+          # 将签名配置同时写入项目根目录与 app 子目录，防御 Gradle 相对路径加载问题
           echo "${{ secrets.SIGNING_CONFIG }}" > local.properties
+          echo "${{ secrets.SIGNING_CONFIG }}" > app/local.properties
 
-          # 自动修正 local.properties 中的 storeFile 路径为当前运行器中的绝对路径
+          # 自动修正并调试 local.properties 中的 storeFile 路径
           python - <<'PY'
           import os
           from pathlib import Path
 
-          local_props = Path("local.properties")
-          if local_props.exists():
-              lines = local_props.read_text().splitlines()
-              patched_lines = []
-              for line in lines:
-                  # 匹配 storeFile 或 STORE_FILE 的配置行
-                  if "storeFile" in line or "STORE_FILE" in line:
-                      parts = line.split('=', 1)
-                      if len(parts) == 2:
+          # 定义需要修正的属性文件路径列表
+          files_to_patch = [Path("local.properties"), Path("app/local.properties")]
+
+          for filepath in files_to_patch:
+              if filepath.exists():
+                  print(f"--- Patching {filepath} (passwords masked for security) ---")
+                  lines = filepath.read_text().splitlines()
+                  patched_lines = []
+                  for line in lines:
+                      line_stripped = line.strip()
+                      if not line_stripped or line_stripped.startswith("#"):
+                          patched_lines.append(line)
+                          continue
+                      
+                      # 寻找到第一个属性分隔符 = 或 :
+                      idx_eq = line.find('=')
+                      idx_col = line.find(':')
+                      sep = None
+                      if idx_eq != -1 and idx_col != -1:
+                          sep = '=' if idx_eq < idx_col else ':'
+                      elif idx_eq != -1:
+                          sep = '='
+                      elif idx_col != -1:
+                          sep = ':'
+                      
+                      if sep:
+                          parts = line.split(sep, 1)
                           key = parts[0].strip()
-                          # 解析出 app/app.key 在 Linux 容器中的绝对路径
-                          abs_path = os.path.abspath("app/app.key")
-                          patched_lines.append(f"{key}={abs_path}")
-                          print(f"✅ Patched {key} to absolute runner path: {abs_path}")
+                          val = parts[1].strip()
+                          
+                          key_lower = key.lower()
+                          val_lower = val.lower()
+                          
+                          # 判断该属性是否代表一个密钥文件路径
+                          is_path_prop = False
+                          if (any(ext in val_lower for ext in [".jks", ".keystore", ".key", "app.key"]) 
+                              or "/" in val or "\\" in val 
+                              or "storefile" in key_lower or "keystore" in key_lower 
+                              or "store_file" in key_lower or "key.store" in key_lower):
+                              is_path_prop = True
+                          
+                          if is_path_prop:
+                              abs_path = os.path.abspath("app/app.key")
+                              patched_lines.append(f"{key}{sep}{abs_path}")
+                              print(f"🔑 [PATH] {key} -> Patched to absolute: {abs_path}")
+                          else:
+                              patched_lines.append(line)
+                              print(f"🔑 [TEXT] {key} -> ***")
                       else:
                           patched_lines.append(line)
-                  else:
-                      patched_lines.append(line)
-              local_props.write_text("\n".join(patched_lines) + "\n")
-          else:
-              print("⚠️ local.properties not found!")
+                  
+                  filepath.write_text("\n".join(patched_lines) + "\n")
+                  print(f"---------------------------------------------------\n")
+              else:
+                  print(f"ℹ️ {filepath} does not exist, skipping.")
           PY
 
           # Write Google Services config (if needed)
