@@ -63,116 +63,26 @@ jobs:
           restore-keys: gradle-${{ runner.os }}-
 
       - name: Prepare build files
-        env:
-          SIGNING_CONFIG_SECRET: ${{ secrets.SIGNING_CONFIG }}
         run: |
-          # 预检 Secrets
-          if [ -z "${{ secrets.KEY_BASE64 }}" ]; then
-            echo "❌ Error: KEY_BASE64 secret is missing!"
-            exit 1
-          fi
-          if [ -z "${{ secrets.SIGNING_CONFIG }}" ]; then
-            echo "❌ Error: SIGNING_CONFIG secret is missing!"
-            exit 1
-          fi
-
-          # Decode base64-encoded keystore
-          echo "${{ secrets.KEY_BASE64 }}" | base64 -d > app/app.key
-
-          # 自动多渠道应用配置并修正路径
+          # 自动修改 Gradle 脚本，将 Release 签名替换为免配置的内置 Debug 签名
           python - <<'PY'
-          import os
           from pathlib import Path
 
-          files_to_create = [
-              "local.properties", "signing.properties", "keystore.properties", "secret.properties",
-              "app/local.properties", "app/signing.properties", "app/keystore.properties", "app/secret.properties"
-          ]
-          files_to_append = [
-              "gradle.properties", "app/gradle.properties"
-          ]
-
-          # 从环境变量安全获取，避免 Shell 注入问题
-          signing_config_text = os.getenv("SIGNING_CONFIG_SECRET", "")
-
-          os.makedirs("app", exist_ok=True)
-
-          # 写入配置文件
-          for f in files_to_create:
-              Path(f).write_text(signing_config_text + "\n")
-
-          for f in files_to_append:
-              p = Path(f)
+          for filename in ["app/build.gradle.kts", "app/build.gradle"]:
+              p = Path(filename)
               if p.exists():
-                  content = p.read_text()
-                  p.write_text(content + "\n" + signing_config_text + "\n")
-              else:
-                  p.write_text(signing_config_text + "\n")
-
-          # 解析、修剪并生成环境变量字典
-          env_vars = {}
-          all_files = files_to_create + files_to_append
-
-          for f in all_files:
-              filepath = Path(f)
-              if filepath.exists():
-                  print(f"--- Processing {filepath} ---")
-                  lines = filepath.read_text().splitlines()
-                  patched_lines = []
-                  for line in lines:
-                      line_stripped = line.strip()
-                      if not line_stripped or line_stripped.startswith("#"):
-                          patched_lines.append(line)
-                          continue
-                      
-                      idx_eq = line.find('=')
-                      idx_col = line.find(':')
-                      sep = None
-                      if idx_eq != -1 and idx_col != -1:
-                          sep = '=' if idx_eq < idx_col else ':'
-                      elif idx_eq != -1:
-                          sep = '='
-                      elif idx_col != -1:
-                          sep = ':'
-                      
-                      if sep:
-                          parts = line.split(sep, 1)
-                          key = parts[0].strip()
-                          val = parts[1].strip()
-                          
-                          key_lower = key.lower()
-                          val_lower = val.lower()
-                          
-                          is_path_prop = False
-                          if (any(ext in val_lower for ext in [".jks", ".keystore", ".key", "app.key"]) 
-                              or "/" in val or "\\" in val 
-                              or "storefile" in key_lower or "keystore" in key_lower 
-                              or "store_file" in key_lower or "key.store" in key_lower):
-                              is_path_prop = True
-                          
-                          if is_path_prop:
-                              abs_path = os.path.abspath("app/app.key")
-                              patched_lines.append(f"{key}{sep}{abs_path}")
-                              env_vars[key] = abs_path
-                              env_vars[key.replace('.', '_').upper()] = abs_path
-                              print(f"🔑 [PATH] {key} -> Patched to: {abs_path}")
-                          else:
-                              patched_lines.append(line)
-                              env_vars[key] = val
-                              env_vars[key.replace('.', '_').upper()] = val
-                              print(f"🔑 [TEXT] {key} -> ***")
-                      else:
-                          patched_lines.append(line)
+                  text = p.read_text()
+                  # 将各种写法的 release 签名配置重定向到内置的 debug 签名
+                  patched = text.replace('signingConfigs.getByName("release")', 'signingConfigs.getByName("debug")')
+                  patched = patched.replace("signingConfigs.getByName('release')", "signingConfigs.getByName('debug')")
+                  patched = patched.replace('signingConfigs.release', 'signingConfigs.debug')
+                  patched = patched.replace('signingConfig signingConfigs.release', 'signingConfig signingConfigs.debug')
                   
-                  filepath.write_text("\n".join(patched_lines) + "\n")
-
-          # 将配置作为系统环境变量导出到 GITHUB_ENV，供后续 Gradle 读取
-          github_env = os.getenv('GITHUB_ENV')
-          if github_env:
-              with open(github_env, 'a') as fe:
-                  for k, v in env_vars.items():
-                      fe.write(f"{k}={v}\n")
-              print("✅ Exported signing variables to GITHUB_ENV successfully.")
+                  if patched != text:
+                      p.write_text(patched)
+                      print(f"✅ Successfully patched {filename} to use debug signing configuration.")
+                  else:
+                      print(f"ℹ️ {filename} did not require patching or no matching signature configuration found.")
           PY
 
           # Write Google Services config (if needed)
